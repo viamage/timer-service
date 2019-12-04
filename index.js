@@ -7,7 +7,7 @@ const evs = require('rethink-event-sourcing')({
 
 evs.db = r.autoConnection()
 
-let queueDuration = 10 * 60 * 1000
+let queueDuration = 1 * 60 * 1000
 let loadMoreAfter = Math.floor(queueDuration / 2)
 
 let timersQueue = [];
@@ -60,9 +60,9 @@ function fireTimer(timer) {
 }
 
 async function timersLoop() {
-  console.error("QUEUE", timersQueue)
   if(timersQueue.length == 0) {
     timersLoopStarted = false
+    setTimeout(checkIfThereIsMore, loadMoreAfter)
     return
   }
   let nextTs = timersQueue[0].timestamp
@@ -106,6 +106,19 @@ async function maybeLoadMore() {
   let timers = await nextTimersCursor.toArray()
   appendTimers(timers)
 }
+
+async function checkIfThereIsMore() {
+  console.log("CHECK IF THERE IS MORE?")
+  let nextTimersCursor = await evs.db.run(
+      r.table('timers')
+          .between(r.minval, Date.now() + queueDuration, { index: 'timestamp' })
+          .orderBy({ index: 'timestamp' })
+  )
+  let timers = await nextTimersCursor.toArray()
+  appendTimers(timers)
+  if(!timersLoopStarted) startTimersLoop()
+}
+
 
 async function startTimers() {
   console.error("START TIMERS")
