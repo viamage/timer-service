@@ -1,17 +1,14 @@
 const r = require('rethinkdb')
 const uuid = require('uuid')
 const evs = require('rethink-event-sourcing')({
-  serviceName: 'timer'
+  serviceName: 'timer',
+  noAutostart: true
 })
 
-evs.onInstall(
-  () => Promise.all([
-    r.tableCreate('timers').run(evs.db)
-  ])
-)
+evs.db = r.autoConnection()
 
-let queueSize = 1024
 let queueDuration = 10 * 60 * 1000
+let loadMoreAfter = Math.floor(queueDuration / 2)
 
 let timersQueue = [];
 let timersById = new Map();
@@ -20,22 +17,23 @@ let timersLoopTimeout = 0
 
 function fireTimer(timer) {
   runTimerAction(timer).catch(error => {
-    let timerTimestamp = Date.now() + retryDelay
-    let retries = timer.retries + 1
-    if(retries > maxRetries) {
+    console.error("TIMER ACTION ERROR", error)
+    let timestamp = Date.now() + timer.retryDelay
+    timer.retries ++
+    if(timer.retries > timer.maxRetries) {
       evs.emitEvents("timer", [{
         type: "timerFinished",
-        timerId: timer.id,
+        timer: timer.id,
         error
-      }], timer.sourceCommandId || 'timer')
+      }], { ...(timer.origin || {}), through: 'timer' })
       timersById.delete(timer.id)
     } else { // Retry
       evs.emitEvents("timer", [{
         type: "timerFailed",
-        timerId: timer.id,
-        error, timerTimestamp
-      }], timer.sourceCommandId || 'timer')
-      timer.timerTimestamp = timerTimestamp
+        timer: timer.id,
+        error, timestamp
+      }], { ...(timer.origin || {}), through: 'timer' })
+      timer.timestamp = timestamp
       insertTimer(timer)
     }
   }).then(
@@ -44,29 +42,30 @@ function fireTimer(timer) {
       if(timer.loops < 0) {
         evs.emitEvents("timer",[{
           type: "timerFinished",
-          timerId : timer.id
-        }], timer.sourceCommandId || 'timer')
+          timer: timer.id
+        }], { ...(timer.origin || {}), through: 'timer' })
         timersById.delete(timer.id)
       } else {
-        let timerTimestamp = timer.timerTimestamp + timer.period
+        let timestamp = timer.timestamp + timer.interval
         evs.emitEvents("timer",[{
           type: "timerFired",
-          timerId : timer.id,
-          timerTimestamp
-        }], timer.sourceCommandId || 'timer')
-        timer.timerTimestamp = timerTimestamp
+          timer: timer.id,
+          timestamp
+        }], { ...(timer.origin || {}), through: 'timer' })
+        timer.timestamp = timestamp
         insertTimer(timer)
       }
     }
   )
 }
 
-function timersLoop() {
+async function timersLoop() {
+  console.error("QUEUE", timersQueue)
   if(timersQueue.length == 0) {
-    timersLoopStarted = false;
-    return;
+    timersLoopStarted = false
+    return
   }
-  let nextTs = timersQueue[0].timerTimestamp
+  let nextTs = timersQueue[0].timestamp
   let now = Date.now()
   while(nextTs < now) {
     fireTimer(timersQueue.shift())
@@ -74,10 +73,11 @@ function timersLoop() {
       timersLoopStarted = false
       return
     }
-    nextTs = timersQueue[0].timerTimestamp
+    nextTs = timersQueue[0].timestamp
   }
   let delay = nextTs - Date.now()
   if(delay > 1000) delay = 1000
+  await maybeLoadMore()
   setTimeout(timersLoop, delay)
 }
 
@@ -95,37 +95,52 @@ function appendTimers(timers) {
   }
 }
 
-function maybeLoadMore() {
-  let lastTime = timersQueue[timersQueue.length - 1].timerTimestamp
-  if(lastTime - Date.now() < queueDuration) {
-    r.table("timers").orderBy(r.asc("timerTimestamp")).filter(r=>r("timerTimestamp").ge(lastTime)).limit(1024).run(evs.db)
-      .then(cursor => cursor.toArray())
-      .then(timers => {
-        appendTimers(timers)
-        if(timers.length == queueSize) maybeLoadMore()
-      })
-  }
+async function maybeLoadMore() {
+  let lastTime = timersQueue[timersQueue.length - 1].timestamp
+  if(!(lastTime - Date.now() < loadMoreAfter)) return
+  let nextTimersCursor = await evs.db.run(
+      r.table('timers')
+          .between(lastTime, Date.now() + queueDuration, { index: 'timestamp' })
+          .orderBy({ index: 'timestamp' })
+  )
+  let timers = await nextTimersCursor.toArray()
+  appendTimers(timers)
 }
 
-function startTimers() {
-  r.table("timers").orderBy(r.asc("timerTimestamp")).limit(queueSize).run(evs.db)
-    .then(cursor => cursor.toArray())
-    .then(timers => {
-      appendTimers(timers)
-      if(timers.length == queueSize) maybeLoadMore()
-      if(!timersLoopStarted) startTimersLoop()
-    })
+async function startTimers() {
+  console.error("START TIMERS")
+  await evs.db.run(r.tableCreate('timers')).catch(err => {})
+  await evs.db.run(r.table('timers').indexCreate('timestamp')).catch(err => {})
+
+  console.error("TIMERS?")
+
+  let nextTimersCursor = await evs.db.run(
+      r.table('timers')
+          .between(r.minval, Date.now() + queueDuration, { index: 'timestamp' })
+          .orderBy({ index: 'timestamp' })
+  )
+  console.error("TIMERS?")
+  let timers = await nextTimersCursor.toArray()
+  console.error("NEXT TIMERS", timers)
+  appendTimers(timers)
+  if(!timersLoopStarted) startTimersLoop()
 }
 
 function runTimerAction(timer) {
-  if(timer.command) return evs.call(timer.service, timer.command, "timer")
+  console.error("RUN ACTION", timer)
+  if(timer.command) return evs.call(timer.service, timer.command, { ...(timer.origin || {}), through: "timer" })
+
+  if(timer.trigger) {
+    if(timer.service) return evs.triggerService(timer.service, timer.trigger, "timer")
+      else return evs.trigger(timer.trigger, "timer")
+  }
   return new Promise((resolve, reject) => resolve(true))
 }
 
 function insertTimer(timer) {
   timersById.set(timer.id, timer)
   for(let i = 0; i < timersQueue; i++) {
-    if(timer.timerTimestamp < timersQueue[i].timerTimestamp) {
+    if(timer.timestamp < timersQueue[i].timestamp) {
       timersQueue.splice(i, 0, timer)
       return;
     }
@@ -133,7 +148,7 @@ function insertTimer(timer) {
   timersQueue.push(timer)
   if(!timersLoopStarted) {
     startTimersLoop()
-  } else if(timer.timerTimestamp - Date.now() < 1000) {
+  } else if(timer.timestamp - Date.now() < 1000) {
     clearTimeout(timersLoopTimeout)
     startTimersLoop()
   }
@@ -150,29 +165,79 @@ function removeTimer(timerId) {
 
 evs.onStart(startTimers)
 
-evs.registerCommands({
+evs.registerTriggers({
 
-  create(data, emit) {
-    let { timerTimestamp, service, command } = data
-    let loops = data.loops || 0
-    let timerId = uuid.v4();
-    let maxRetries = data.maxRetries || 0
-    let retryDelay = data.retryDelay || 25 * 1000
-    let period = data.period || 0
-    if(loops > 0 && period ==0) throw evs.error("impossibleTimer")
+  createTimer( data, emit) {
+    let timer = data.timer
+    let { timestamp, service, command } = timer
+    let loops = timer.loops || 0
+    let timerId = timer.id || uuid.v4()
+    let maxRetries = timer.maxRetries || 0
+    let retryDelay = timer.retryDelay || 5 * 1000
+    let interval = timer.interval || 0
+    if(loops > 0 && interval ==0) throw evs.error("impossibleTimer")
+    const props = {
+      timestamp, service, command, loops, interval, timerId, maxRetries, retryDelay, retries: 0
+    }
+    if(data.origin) props.origin = data.origin
     emit([{
       type: "timerCreated",
-      timerTimestamp, service, command, loops, period, timerId, maxRetries, retryDelay
+      timer: timerId,
+      data: props
     }])
-    insertTimer({ timerTimestamp, service, command, loops, period, id: timerId, sourceCommandId: data.id })
+    if(timestamp < Date.now() + queueDuration) {
+      insertTimer({ ...props , id: timerId })
+    }
     return timerId
   },
-  cancel({ timerId }, emit) {
-    return r.table("timers").get(timerId).run(evs.db).then(
+
+  cancelTimer({ timerId }, emit) {
+    return evs.db.run(r.table("timers").get(timerId)).then(
       timerRow => {
         if(!timerRow) throw evs.error("notFound")
         emit([{
-          type: "timerCanceled", timerId
+          type: "timerCanceled", timer: timerId
+        }])
+        removeTimer(timerId)
+        return true
+      }
+    )
+  }
+
+})
+
+evs.registerCommands({
+
+  create( data , emit) {
+    let timer = data.timer
+    let { timestamp, service, command } = timer
+    let loops = timer.loops || 0
+    let timerId = timer.id || uuid.v4()
+    let maxRetries = timer.maxRetries || 0
+    let retryDelay = timer.retryDelay || 5 * 1000
+    let interval = timer.interval || 0
+    if(loops > 0 && interval == 0) throw evs.error("impossibleTimer")
+    const props = {
+      timestamp, service, command, loops, interval, timerId, maxRetries, retryDelay, retries: 0
+    }
+    if(data.origin) props.origin = data.origin
+    emit([{
+      type: "timerCreated",
+      timer: timerId,
+      data: props
+    }])
+    if(timestamp < Date.now() + queueDuration) {
+      insertTimer({ ...props , id: timerId })
+    }
+    return timerId
+  },
+
+  cancel({ timerId }, emit) {
+    return evs.db.run(r.table("timers").get(timerId)).then(
+      timerRow => {
+        if(!timerRow) throw evs.error("notFound")
+        emit([{
+          type: "timerCanceled", timer: timerId
         }])
         removeTimer(timerId)
         return true
@@ -183,29 +248,49 @@ evs.registerCommands({
 })
 
 evs.registerEventListeners({
-  queuedBy: 'timerId',
+  queuedBy: 'timer',
 
-  timerCreated({ timerId, timerTimestamp, service, command, loops, period, maxRetries, retryDelay, commandId }) {
-    return r.table("timers").insert({
-      id: timerId, timerTimestamp, service, command, loops, period, retries: 0, maxRetries, retryDelay,
-      sourceCommandId: commandId
-    }).run(evs.db)
+  timerCreated({ timer, data: { timestamp, service, command, loops, interval, maxRetries, retryDelay }, origin}) {
+    return evs.db.run(
+      r.table("timers").insert({
+        id: timer,
+        timestamp, service, command, loops, interval, retries: 0, maxRetries, retryDelay, origin
+      })
+    )
   },
-  timerCanceled({ timerId }) {
-    return r.table("timers").get(timerId).delete().run(evs.db)
+  timerCanceled({ timer }) {
+    return evs.db.run(
+        r.table("timers").get(timer).delete()
+    )
   },
-  timerFinished({ timerId }) {
-    return r.table("timers").get(timerId).delete().run(evs.db)
+  timerFinished({ timer }) {
+    return evs.db.run(
+        r.table("timers").get(timer).delete()
+    )
   },
-  timerFired({ timerId, timerTimestamp }) {
-    return r.table("timers").get(timerId).update(
-      row => ({ loops: row("loops").sub(1), timerTimestamp })
-    ).run(evs.db)
+  timerFired({ timer, timestamp }) {
+    return evs.db.run(
+      r.table("timers").get(timer).update(
+        row => ({ loops: row("loops").sub(1), timestamp })
+      )
+    )
   },
-  timerFailed({ timerId, timerTimestamp }) {
-    return r.table("timers").get(timerId).update(
-      row => ({ retries: row("retries").add(1), timerTimestamp })
-    ).run(evs.db)
+  timerFailed({ timer, timestamp }) {
+    return evs.db.run(
+      r.table("timers").get(timer).update(
+        row => ({ retries: row("retries").add(1), timestamp })
+      )
+    )
   }
 
 })
+
+require("../config/metricsWriter.js")('timer', () => ({
+
+}))
+
+process.on('unhandledRejection', (reason, p) => {
+  console.log('Unhandled Rejection at: Promise', p, 'reason:', reason)
+})
+
+evs.start()

@@ -11,7 +11,7 @@ test('Timer service', t => {
 
   testUtils.connectToDatabase(t, r, (connection) => conn = connection)
 
-  let userId = crypto.randomBytes(24).toString('hex')
+  let sessionId = crypto.randomBytes(24).toString('hex')
 
   t.test('create empty timer', t => {
     t.plan(3)
@@ -20,9 +20,11 @@ test('Timer service', t => {
 
     testUtils.runCommand(t, r, 'timer', {
       type: 'create',
-      timerTimestamp: Date.now() + 1000,
-      service: null,
-      command: null
+      timer: {
+        timestamp: Date.now() + 1000,
+        service: null,
+        command: null
+      }
     }, (cId) => { }).then(
       result => timerId = result
     )
@@ -55,16 +57,18 @@ test('Timer service', t => {
 
   let timerId
 
-  t.test('create timer that will create user', t => {
+  t.test('create timer that will create session', t => {
     t.plan(4)
 
     testUtils.runCommand(t, r, 'timer', {
       type: 'create',
-      timerTimestamp: Date.now() + 1000,
-      service: "user",
-      command: {
-        type: 'create',
-        userId: userId
+      timer: {
+        timestamp: Date.now() + 1000,
+        service: "session",
+        command: {
+          type: 'createSessionIfNotExists',
+          session: sessionId
+        }
       }
     }, (cId) => { }).then(
       result => timerId = result
@@ -82,13 +86,13 @@ test('Timer service', t => {
       }, 300)
     })
 
-    t.test('check if user exists', t=> {
+    t.test('check if session exists', t=> {
       t.plan(1)
       setTimeout(()=>{
-        r.table('user').get(userId).run(conn).then(
-          userRow => {
-            if(userRow) t.pass('user exists')
-            else t.fail('user not found')
+        r.table('session').get(sessionId).run(conn).then(
+          sessionRow => {
+            if(sessionRow) t.pass('session exists')
+            else t.fail('session not found')
           }
         ).catch(t.fail)
       }, 1500)
@@ -113,11 +117,13 @@ test('Timer service', t => {
 
     testUtils.runCommand(t, r, 'timer', {
       type: 'create',
-      timerTimestamp: Date.now() + 1000,
-      loops: 10,
-      period: 1000,
-      service: null,
-      command: null
+      timer: {
+        timestamp: Date.now() + 1000,
+        loops: 10,
+        interval: 1000,
+        service: null,
+        command: null
+      }
     }, (cId) => { }).then(
       result => timerId = result
     )
