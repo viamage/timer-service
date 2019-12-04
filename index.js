@@ -14,6 +14,7 @@ let timersQueue = [];
 let timersById = new Map();
 let timersLoopStarted = false
 let timersLoopTimeout = 0
+let lastLoadTime = 0
 
 function fireTimer(timer) {
   runTimerAction(timer).catch(error => {
@@ -96,25 +97,31 @@ function appendTimers(timers) {
 }
 
 async function maybeLoadMore() {
-  let lastTime = timersQueue[timersQueue.length - 1].timestamp
-  if(!(lastTime - Date.now() < loadMoreAfter)) return
+  if(!(lastLoadTime - Date.now() < loadMoreAfter)) return
+  let loadTime = Date.now() + queueDuration
   let nextTimersCursor = await evs.db.run(
       r.table('timers')
-          .between(lastTime, Date.now() + queueDuration, { index: 'timestamp' })
+          .between(lastLoadTime, loadTime, { index: 'timestamp' })
           .orderBy({ index: 'timestamp' })
   )
   let timers = await nextTimersCursor.toArray()
-  appendTimers(timers)
+  lastLoadTime = loadTime
+  for(let timer of timers) {
+    insertTimer(timer)
+  }
 }
 
 async function checkIfThereIsMore() {
+  if(timersLoopStarted) return // loop started
   console.log("CHECK IF THERE IS MORE?")
+  let loadTime = Date.now() + queueDuration
   let nextTimersCursor = await evs.db.run(
       r.table('timers')
-          .between(r.minval, Date.now() + queueDuration, { index: 'timestamp' })
+          .between(r.minval, loadTime, { index: 'timestamp' })
           .orderBy({ index: 'timestamp' })
   )
   let timers = await nextTimersCursor.toArray()
+  lastLoadTime = loadTime
   appendTimers(timers)
   if(!timersLoopStarted) startTimersLoop()
 }
@@ -127,14 +134,16 @@ async function startTimers() {
 
   console.error("TIMERS?")
 
+  let loadTime = Date.now() + queueDuration
   let nextTimersCursor = await evs.db.run(
       r.table('timers')
-          .between(r.minval, Date.now() + queueDuration, { index: 'timestamp' })
+          .between(r.minval, loadTime, { index: 'timestamp' })
           .orderBy({ index: 'timestamp' })
   )
   console.error("TIMERS?")
   let timers = await nextTimersCursor.toArray()
   console.error("NEXT TIMERS", timers)
+  lastLoadTime = loadTime
   appendTimers(timers)
   if(!timersLoopStarted) startTimersLoop()
 }
