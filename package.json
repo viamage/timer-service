@@ -1,0 +1,19 @@
+{
+  "name": "timer-service",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "DB_NAME=golddigger node index.js",
+    "setup": "DB_NAME=golddigger INSTALL=true node index.js",
+    "test": "NODE_ENV=test DB_NAME=golddigger blue-tape tests/*"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "blue-tape": "^1.0.0",
+    "rethink-event-sourcing": "git+https://github.com/MLaszczewski/rethink-event-sourcing.git",
+    "rethinkdb": "^2.3.3",
+    "uuid": "^3.1.0"
+  }
+}
