@@ -191,7 +191,7 @@ evs.registerTriggers({
 
   createTimer( data, emit) {
     let timer = data.timer
-    let { timestamp, service, command } = timer
+    let timestamp = timer.timestamp
     let loops = timer.loops || 0
     let timerId = timer.id || uuid.v4()
     let maxRetries = timer.maxRetries || 0
@@ -199,9 +199,8 @@ evs.registerTriggers({
     let interval = timer.interval || 0
     if(loops > 0 && interval ==0) throw evs.error("impossibleTimer")
     const props = {
-      timestamp, service, command, loops, interval, timerId, maxRetries, retryDelay, retries: 0
+      ...timer, timestamp, loops, interval, timerId, maxRetries, retryDelay, retries: 0
     }
-    if(data.origin) props.origin = data.origin
     emit([{
       type: "timerCreated",
       timer: timerId,
@@ -232,7 +231,7 @@ evs.registerCommands({
 
   create( data , emit) {
     let timer = data.timer
-    let { timestamp, service, command } = timer
+    let timestamp = timer.timestamp
     let loops = timer.loops || 0
     let timerId = timer.id || uuid.v4()
     let maxRetries = timer.maxRetries || 0
@@ -240,9 +239,8 @@ evs.registerCommands({
     let interval = timer.interval || 0
     if(loops > 0 && interval == 0) throw evs.error("impossibleTimer")
     const props = {
-      timestamp, service, command, loops, interval, timerId, maxRetries, retryDelay, retries: 0
+      ...timer, timestamp, loops, interval, timerId, maxRetries, retryDelay, retries: 0
     }
-    if(data.origin) props.origin = data.origin
     emit([{
       type: "timerCreated",
       timer: timerId,
@@ -272,11 +270,12 @@ evs.registerCommands({
 evs.registerEventListeners({
   queuedBy: 'timer',
 
-  timerCreated({ timer, data: { timestamp, service, command, loops, interval, maxRetries, retryDelay }, origin}) {
+  timerCreated({ timer, data, origin }) {
     return evs.db.run(
       r.table("timers").insert({
         id: timer,
-        timestamp, service, command, loops, interval, retries: 0, maxRetries, retryDelay, origin
+        ...data,
+        origin: { ...origin, ...( data.origin || {} ) }
       })
     )
   },
