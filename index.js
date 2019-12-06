@@ -153,7 +153,7 @@ function runTimerAction(timer) {
   if(timer.command) return evs.call(timer.service, timer.command, { ...(timer.origin || {}), through: "timer" })
 
   if(timer.trigger) {
-    if(timer.service) return evs.triggerService(timer.service, timer.trigger, "timer")
+    if(timer.service) return evs.triggerService(timer.service, timer.trigger, { ...(timer.origin || {}), through: "timer" })
       else return evs.trigger(timer.trigger, "timer")
   }
   return new Promise((resolve, reject) => resolve(true))
